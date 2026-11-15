@@ -6,15 +6,18 @@ import android.app.Activity
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothSocket
+import android.content.ClipData
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.*
+import android.graphics.drawable.Drawable
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
+import android.text.TextUtils
 import android.view.*
 import android.widget.*
 import java.io.InputStream
@@ -24,30 +27,37 @@ import java.util.*
 import kotlin.concurrent.thread
 import kotlin.math.*
 
+data class AppEntry(
+    val packageName: String,
+    val label: String,
+    val icon: Drawable
+)
+
 class MainActivity : Activity() {
 
     private var activeTab = 0 // 0 = Home, 1 = CarPlay, 2 = Gauges (Car), 3 = MMI, 4 = Settings
     private val railButtons = mutableListOf<Mib3RailButton>()
 
-    private lateinit var homePanel: LinearLayout
+    private lateinit var homePanel: FrameLayout
+    private lateinit var appGridContainer: LinearLayout
     private lateinit var gaugesPanel: LinearLayout
     private lateinit var settingsPanel: LinearLayout
     private lateinit var clockText: TextView
     private lateinit var btStatusText: TextView
 
-    // Left Column Full-Card Sweeping Bar Gauges (Top to Bottom)
+    private val installedApps = mutableListOf<AppEntry>()
+    private var draggedPackageName: String? = null
+
     private lateinit var boostGauge: Mib3BarGaugeView
     private lateinit var loadGauge: Mib3BarGaugeView
     private lateinit var hpGauge: Mib3BarGaugeView
     private lateinit var tqGauge: Mib3BarGaugeView
 
-    // Right Column Thermal Cards (Top to Bottom)
     private lateinit var iatCard: Mib3TempCardView
     private lateinit var coolantCard: Mib3TempCardView
     private lateinit var oilCard: Mib3TempCardView
     private lateinit var egtCard: Mib3TempCardView
 
-    // Telemetry state
     @Volatile private var boostPsi = 0.0f
     @Volatile private var engineLoadPct = 0.0f
     @Volatile private var crankHp = 0.0f
@@ -74,6 +84,7 @@ class MainActivity : Activity() {
             }
         }
 
+        loadInstalledApps()
         setContentView(buildRootLayout())
         selectTab(0)
         startClockAndUiLoop()
@@ -112,10 +123,9 @@ class MainActivity : Activity() {
             )
         }
 
-        // 1. LEFT 5-BUTTON MIB3 GLASS NAVIGATION RAIL
         val rail = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            layoutParams = LinearLayout.LayoutParams(dp(74), ViewGroup.LayoutParams.MATCH_PARENT)
+            layoutParams = LinearLayout.LayoutParams(dp(72), ViewGroup.LayoutParams.MATCH_PARENT)
             setBackgroundColor(Color.parseColor("#08090B"))
         }
 
@@ -142,31 +152,29 @@ class MainActivity : Activity() {
 
         root.addView(rail)
 
-        // Subtle vertical glass divider
         root.addView(View(this).apply {
             layoutParams = LinearLayout.LayoutParams(dp(1), ViewGroup.LayoutParams.MATCH_PARENT)
             setBackgroundColor(Color.parseColor("#2A2D32"))
         })
 
-        // 2. RIGHT MAIN VIEWPORT (TOP MIB3 STATUS BAR + CONTENT AREA)
         val mainArea = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f)
-            setPadding(dp(16), dp(8), dp(18), dp(12))
+            setPadding(dp(14), dp(8), dp(16), dp(10))
         }
 
-        // Top MIB3 Status Strip
         val statusBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(28))
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(26))
         }
 
         val headerTitle = TextView(this).apply {
-            text = "AUDI RS  |  3.0T SUPERCHARGED"
+            text = "AUDI SPORT  |  AP MEDIA INTERFACE"
             setTextColor(Color.parseColor("#D4D7DC"))
-            textSize = 12f
-            letterSpacing = 0.14f
+            textSize = 11.5f
+            letterSpacing = 0.12f
+            isSingleLine = true
             typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
@@ -174,15 +182,17 @@ class MainActivity : Activity() {
         btStatusText = TextView(this).apply {
             text = "vLINKER: STANDBY"
             setTextColor(Color.parseColor("#9DA3AE"))
-            textSize = 11f
-            letterSpacing = 0.08f
-            setPadding(0, 0, dp(16), 0)
+            textSize = 10.5f
+            letterSpacing = 0.06f
+            isSingleLine = true
+            setPadding(0, 0, dp(12), 0)
         }
 
         clockText = TextView(this).apply {
             text = "12:00 PM"
             setTextColor(Color.WHITE)
-            textSize = 13f
+            textSize = 11.5f
+            isSingleLine = true
             typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
         }
 
@@ -191,16 +201,14 @@ class MainActivity : Activity() {
         statusBar.addView(clockText)
         mainArea.addView(statusBar)
 
-        // Thin MIB3 horizontal separator line
         mainArea.addView(View(this).apply {
             layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)).apply {
                 topMargin = dp(4)
-                bottomMargin = dp(10)
+                bottomMargin = dp(8)
             }
             setBackgroundColor(Color.parseColor("#2E3136"))
         })
 
-        // Content Frame
         val contentFrame = FrameLayout(this).apply {
             layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
         }
@@ -218,43 +226,261 @@ class MainActivity : Activity() {
         return root
     }
 
-    // =========================================================================
-    // TAB 0: MIB3 GLASS HOME TILES
-    // =========================================================================
-    private fun buildHomePanel(): LinearLayout {
-        val container = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
+    private fun loadInstalledApps() {
+        val pm = packageManager
+        val mainIntent = Intent(Intent.ACTION_MAIN, null).apply {
+            addCategory(Intent.CATEGORY_LAUNCHER)
+        }
+        val resolveInfos = pm.queryIntentActivities(mainIntent, 0)
+        val rawApps = resolveInfos
+            .filter { it.activityInfo.packageName != packageName }
+            .distinctBy { it.activityInfo.packageName }
+            .map {
+                AppEntry(
+                    packageName = it.activityInfo.packageName,
+                    label = it.loadLabel(pm).toString(),
+                    icon = it.loadIcon(pm)
+                )
+            }
+
+        val prefs = getSharedPreferences("mib3_launcher_prefs", Context.MODE_PRIVATE)
+        val savedOrder = prefs.getString("app_order", "")
+            ?.split(",")
+            ?.filter { it.isNotBlank() }
+            ?: emptyList()
+
+        installedApps.clear()
+        val byPkg = rawApps.associateBy { it.packageName }.toMutableMap()
+
+        for (pkg in savedOrder) {
+            byPkg.remove(pkg)?.let { installedApps.add(it) }
+        }
+        installedApps.addAll(byPkg.values.sortedBy { it.label.lowercase(Locale.US) })
+    }
+
+    private fun saveAppOrder() {
+        val serialized = installedApps.joinToString(",") { it.packageName }
+        getSharedPreferences("mib3_launcher_prefs", Context.MODE_PRIVATE)
+            .edit()
+            .putString("app_order", serialized)
+            .apply()
+    }
+
+    private fun buildHomePanel(): FrameLayout {
+        val wrapper = FrameLayout(this).apply {
             layoutParams = FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
-            gravity = Gravity.CENTER_VERTICAL
         }
 
-        val tiles = listOf(
-            Triple("APPLE CARPLAY", Color.parseColor("#34C759")) { launchPackage("com.syu.carlink") },
-            Triple("RS TELEMETRY", Color.parseColor("#E52528")) { selectTab(2) },
-            Triple("AUDI MMI 3G+", Color.parseColor("#E5A93C")) { launchPackage("com.syu.av") },
-            Triple("SYSTEM & SETUP", Color.parseColor("#64A8FF")) { selectTab(4) }
-        )
+        val hintText = TextView(this).apply {
+            text = "HOLD ANY APP ICON FOR 3 SECONDS TO DRAG & REORDER"
+            setTextColor(Color.parseColor("#787E8A"))
+            textSize = 9.5f
+            letterSpacing = 0.09f
+            gravity = Gravity.END
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.BOTTOM
+            )
+        }
 
-        tiles.forEachIndexed { idx, (label, accentColor, action) ->
-            val card = Mib3GlassTile(this, label, accentColor).apply {
-                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f).apply {
-                    if (idx > 0) leftMargin = dp(12)
-                    topMargin = dp(16)
-                    bottomMargin = dp(16)
-                }
-                setOnClickListener { action() }
+        val hScroll = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            ).apply {
+                bottomMargin = dp(16)
             }
-            container.addView(card)
         }
-        return container
+
+        appGridContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        }
+
+        renderAppColumns()
+        hScroll.addView(appGridContainer)
+        wrapper.addView(hScroll)
+        wrapper.addView(hintText)
+        return wrapper
     }
 
-    // =========================================================================
-    // TAB 2: 2-COLUMN x 4-ROW TELEMETRY GAUGES GRID
-    // =========================================================================
+    private fun renderAppColumns() {
+        appGridContainer.removeAllViews()
+        val chunked = installedApps.chunked(2)
+        chunked.forEachIndexed { colIdx, pair ->
+            val col = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                layoutParams = LinearLayout.LayoutParams(dp(172), ViewGroup.LayoutParams.MATCH_PARENT).apply {
+                    if (colIdx > 0) leftMargin = dp(10)
+                }
+            }
+
+            pair.forEachIndexed { rowIdx, app ->
+                val tile = createDraggableAppTile(app).apply {
+                    layoutParams = LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        0,
+                        1f
+                    ).apply {
+                        if (rowIdx > 0) topMargin = dp(10)
+                    }
+                }
+                col.addView(tile)
+            }
+
+            if (pair.size == 1) {
+                col.addView(View(this).apply {
+                    layoutParams = LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        0,
+                        1f
+                    ).apply { topMargin = dp(10) }
+                })
+            }
+
+            appGridContainer.addView(col)
+        }
+    }
+
+    @SuppressLint("ClickableViewAccessibility")
+    private fun createDraggableAppTile(app: AppEntry): FrameLayout {
+        val card = Mib3AppTileFrame(this).apply {
+            tag = app.packageName
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+        }
+
+        val inner = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        }
+
+        val iconView = ImageView(this).apply {
+            setImageDrawable(app.icon)
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            layoutParams = LinearLayout.LayoutParams(dp(44), dp(44))
+        }
+
+        val labelView = TextView(this).apply {
+            text = app.label.uppercase(Locale.US)
+            setTextColor(Color.parseColor("#ECEEF2"))
+            textSize = 11f
+            letterSpacing = 0.05f
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+            gravity = Gravity.CENTER
+            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = dp(8)
+            }
+        }
+
+        inner.addView(iconView)
+        inner.addView(labelView)
+        card.addView(inner)
+
+        var downX = 0f
+        var downY = 0f
+        var dragStarted = false
+        val holdRunnable = Runnable {
+            dragStarted = true
+            draggedPackageName = app.packageName
+            card.setDraggingHighlight(true)
+            card.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+            val clip = ClipData.newPlainText("app_pkg", app.packageName)
+            val shadow = View.DragShadowBuilder(card)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                card.startDragAndDrop(clip, shadow, app.packageName, 0)
+            } else {
+                @Suppress("DEPRECATION")
+                card.startDrag(clip, shadow, app.packageName, 0)
+            }
+        }
+
+        card.setOnTouchListener { _, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    downX = event.x
+                    downY = event.y
+                    dragStarted = false
+                    uiHandler.postDelayed(holdRunnable, 3000L)
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    if (!dragStarted && (abs(event.x - downX) > dp(16) || abs(event.y - downY) > dp(16))) {
+                        uiHandler.removeCallbacks(holdRunnable)
+                    }
+                    true
+                }
+                MotionEvent.ACTION_UP -> {
+                    uiHandler.removeCallbacks(holdRunnable)
+                    if (!dragStarted) {
+                        launchPackage(app.packageName)
+                    }
+                    true
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    uiHandler.removeCallbacks(holdRunnable)
+                    true
+                }
+                else -> false
+            }
+        }
+
+        card.setOnDragListener { _, dragEvent ->
+            when (dragEvent.action) {
+                DragEvent.ACTION_DRAG_STARTED -> true
+                DragEvent.ACTION_DRAG_ENTERED -> {
+                    if (draggedPackageName != app.packageName) {
+                        card.setDropTargetHighlight(true)
+                    }
+                    true
+                }
+                DragEvent.ACTION_DRAG_EXITED -> {
+                    card.setDropTargetHighlight(false)
+                    true
+                }
+                DragEvent.ACTION_DROP -> {
+                    card.setDropTargetHighlight(false)
+                    val fromPkg = draggedPackageName ?: return@setOnDragListener false
+                    val fromIdx = installedApps.indexOfFirst { it.packageName == fromPkg }
+                    val toIdx = installedApps.indexOfFirst { it.packageName == app.packageName }
+                    if (fromIdx != -1 && toIdx != -1 && fromIdx != toIdx) {
+                        val moved = installedApps.removeAt(fromIdx)
+                        installedApps.add(toIdx, moved)
+                        saveAppOrder()
+                        renderAppColumns()
+                    }
+                    true
+                }
+                DragEvent.ACTION_DRAG_ENDED -> {
+                    card.setDraggingHighlight(false)
+                    card.setDropTargetHighlight(false)
+                    draggedPackageName = null
+                    true
+                }
+                else -> false
+            }
+        }
+
+        return card
+    }
+
     private fun buildGaugesPanel(): LinearLayout {
         val grid = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -264,11 +490,10 @@ class MainActivity : Activity() {
             )
         }
 
-        // LEFT COLUMN: 4 Full-Background Left-to-Right MIB3 Gradient Bar Gauges
         val leftCol = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1.15f).apply {
-                rightMargin = dp(12)
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1.06f).apply {
+                rightMargin = dp(10)
             }
         }
 
@@ -284,10 +509,9 @@ class MainActivity : Activity() {
             leftCol.addView(view)
         }
 
-        // RIGHT COLUMN: 4 Thermal Digital Cards (Cool Blue -> White -> Amber -> RS Red)
         val rightCol = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 0.85f)
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 0.94f)
         }
 
         iatCard = Mib3TempCardView(this, "CHARGE AIR TEMP", "°F", coolThresh = 95f, warnThresh = 130f, hotThresh = 155f)
@@ -307,9 +531,6 @@ class MainActivity : Activity() {
         return grid
     }
 
-    // =========================================================================
-    // TAB 4: SETTINGS & FYT HOME OVERRIDE ACTIVATION
-    // =========================================================================
     private fun buildSettingsPanel(): LinearLayout {
         val panel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -323,16 +544,19 @@ class MainActivity : Activity() {
         val row1 = Mib3ActionRow(this, "Enable Physical Home Button Override (Accessibility Service)", "Locks physical Home key to Audi RS Cockpit instead of UI08") {
             startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
         }
-        val row2 = Mib3ActionRow(this, "Bluetooth Settings (Pair Vgate vLinker MC+)", "Ensure vLinker MC+ is paired once in Android Bluetooth") {
+        val row2 = Mib3ActionRow(this, "Set Default Home Launcher", "Select Audi RS Cockpit as default Android Home app") {
+            startActivity(Intent(Settings.ACTION_HOME_SETTINGS))
+        }
+        val row3 = Mib3ActionRow(this, "Bluetooth Settings (Pair Vgate vLinker MC+)", "Ensure vLinker MC+ is paired once in Android Bluetooth") {
             startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS))
         }
-        val row3 = Mib3ActionRow(this, "Open Android System Settings", "Access FYT factory menu, display, and sound settings") {
+        val row4 = Mib3ActionRow(this, "Open Android System Settings", "Access FYT factory menu, display, and sound settings") {
             startActivity(Intent(Settings.ACTION_SETTINGS))
         }
 
-        listOf(row1, row2, row3).forEachIndexed { idx, row ->
-            row.layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(68)).apply {
-                if (idx > 0) topMargin = dp(10)
+        listOf(row1, row2, row3, row4).forEachIndexed { idx, row ->
+            row.layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(58)).apply {
+                if (idx > 0) topMargin = dp(8)
             }
             panel.addView(row)
         }
@@ -367,7 +591,6 @@ class MainActivity : Activity() {
         }
     }
 
-    // 60 FPS UI Loop for silky-smooth full-card bar transitions
     private fun startClockAndUiLoop() {
         val fmt = SimpleDateFormat("h:mm a", Locale.getDefault())
         uiHandler.post(object : Runnable {
@@ -394,9 +617,6 @@ class MainActivity : Activity() {
         })
     }
 
-    // =========================================================================
-    // VGATE vLINKER MC+ BLUETOOTH OBD2 WORKER + SIMOS 8.5 POWER MATH
-    // =========================================================================
     @SuppressLint("MissingPermission")
     private fun startObd2Worker() {
         thread(isDaemon = true) {
@@ -549,6 +769,74 @@ class Mib3RootBackground(context: Context) : LinearLayout(context) {
     init { setWillNotDraw(false) }
 }
 
+class Mib3AppTileFrame(context: Context) : FrameLayout(context) {
+    private var isDragging = false
+    private var isDropTarget = false
+    private val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val sheenPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeWidth = 2f
+    }
+
+    init { setWillNotDraw(false) }
+
+    fun setDraggingHighlight(active: Boolean) {
+        isDragging = active
+        invalidate()
+    }
+
+    fun setDropTargetHighlight(active: Boolean) {
+        isDropTarget = active
+        invalidate()
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        super.onDraw(canvas)
+        val w = width.toFloat()
+        val h = height.toFloat()
+
+        if (isDragging || isDropTarget) {
+            bgPaint.shader = LinearGradient(
+                0f, 0f, w, h,
+                intArrayOf(Color.parseColor("#2A0B0E"), Color.parseColor("#7A1D20"), Color.parseColor("#3B0E10")),
+                floatArrayOf(0f, 0.5f, 1f),
+                Shader.TileMode.CLAMP
+            )
+        } else {
+            bgPaint.shader = LinearGradient(
+                0f, 0f, w, h,
+                intArrayOf(Color.parseColor("#111317"), Color.parseColor("#22252B"), Color.parseColor("#0E1013")),
+                floatArrayOf(0f, 0.52f, 1f),
+                Shader.TileMode.CLAMP
+            )
+        }
+        canvas.drawRect(0f, 0f, w, h, bgPaint)
+
+        val sheen = Path().apply {
+            moveTo(0f, 0f)
+            lineTo(w, 0f)
+            lineTo(w, h * 0.40f)
+            lineTo(0f, h * 0.62f)
+            close()
+        }
+        sheenPaint.shader = LinearGradient(
+            0f, 0f, 0f, h * 0.62f,
+            Color.parseColor("#16FFFFFF"),
+            Color.TRANSPARENT,
+            Shader.TileMode.CLAMP
+        )
+        canvas.drawPath(sheen, sheenPaint)
+
+        borderPaint.color = when {
+            isDropTarget -> Color.parseColor("#FF4A4D")
+            isDragging -> Color.parseColor("#E5393C")
+            else -> Color.parseColor("#35FFFFFF")
+        }
+        canvas.drawRect(1f, 1f, w - 1f, h - 1f, borderPaint)
+    }
+}
+
 class Mib3RailButton(context: Context, private val iconType: Mib3IconType) : View(context) {
     private var isActive = false
     private val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -556,6 +844,9 @@ class Mib3RailButton(context: Context, private val iconType: Mib3IconType) : Vie
         style = Paint.Style.STROKE
         strokeCap = Paint.Cap.ROUND
         strokeJoin = Paint.Join.ROUND
+    }
+    private val fillIconPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL
     }
     private val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
@@ -597,8 +888,10 @@ class Mib3RailButton(context: Context, private val iconType: Mib3IconType) : Vie
         val cy = h * 0.5f
         val s = min(w, h) * 0.25f
 
-        strokePaint.color = if (isActive) Color.parseColor("#FF3B3E") else Color.parseColor("#ECEEF2")
+        val iconColor = if (isActive) Color.parseColor("#FF3B3E") else Color.parseColor("#ECEEF2")
+        strokePaint.color = iconColor
         strokePaint.strokeWidth = s * 0.13f
+        fillIconPaint.color = iconColor
 
         when (iconType) {
             Mib3IconType.HOME -> {
@@ -615,14 +908,20 @@ class Mib3RailButton(context: Context, private val iconType: Mib3IconType) : Vie
                 canvas.drawPath(path, strokePaint)
             }
             Mib3IconType.CARPLAY -> {
-                val path = Path().apply {
-                    moveTo(cx, cy - s * 0.9f)
-                    lineTo(cx + s * 0.65f, cy + s * 0.82f)
-                    lineTo(cx, cy + s * 0.45f)
-                    lineTo(cx - s * 0.65f, cy + s * 0.82f)
+                val frameRect = RectF(cx - s * 0.88f, cy - s * 0.68f, cx + s * 0.88f, cy + s * 0.68f)
+                canvas.drawRoundRect(frameRect, s * 0.24f, s * 0.24f, strokePaint)
+                val barX = cx - s * 0.48f
+                canvas.drawLine(barX, cy - s * 0.64f, barX, cy + s * 0.64f, strokePaint)
+                canvas.drawCircle(cx - s * 0.68f, cy - s * 0.30f, s * 0.06f, fillIconPaint)
+                canvas.drawCircle(cx - s * 0.68f, cy, s * 0.06f, fillIconPaint)
+                canvas.drawCircle(cx - s * 0.68f, cy + s * 0.30f, s * 0.06f, fillIconPaint)
+                val playTri = Path().apply {
+                    moveTo(cx - s * 0.12f, cy - s * 0.34f)
+                    lineTo(cx + s * 0.48f, cy)
+                    lineTo(cx - s * 0.12f, cy + s * 0.34f)
                     close()
                 }
-                canvas.drawPath(path, strokePaint)
+                canvas.drawPath(playTri, fillIconPaint)
             }
             Mib3IconType.CAR_GAUGES -> {
                 val car = Path().apply {
@@ -650,15 +949,18 @@ class Mib3RailButton(context: Context, private val iconType: Mib3IconType) : Vie
                 canvas.drawRect(cx - s * 0.34f, cy + s * 0.04f, cx + s * 0.34f, cy + s * 0.34f, strokePaint)
             }
             Mib3IconType.MMI -> {
-                canvas.drawCircle(cx, cy - s * 0.2f, s * 0.16f, strokePaint)
-                canvas.drawLine(cx, cy - s * 0.36f, cx, cy - s * 0.85f, strokePaint)
-                canvas.drawLine(cx, cy - s * 0.04f, cx, cy + s * 0.82f, strokePaint)
-                val arcRect1 = RectF(cx - s * 0.48f, cy - s * 0.68f, cx + s * 0.48f, cy + s * 0.28f)
-                canvas.drawArc(arcRect1, -35f, 70f, false, strokePaint)
-                canvas.drawArc(arcRect1, 145f, 70f, false, strokePaint)
-                val arcRect2 = RectF(cx - s * 0.82f, cy - s * 1.02f, cx + s * 0.82f, cy + s * 0.62f)
-                canvas.drawArc(arcRect2, -35f, 70f, false, strokePaint)
-                canvas.drawArc(arcRect2, 145f, 70f, false, strokePaint)
+                canvas.drawCircle(cx, cy, s * 0.48f, strokePaint)
+                canvas.drawCircle(cx, cy, s * 0.18f, fillIconPaint)
+                val d = s * 0.66f
+                val len = s * 0.22f
+                canvas.drawLine(cx - d, cy - d + len, cx - d, cy - d, strokePaint)
+                canvas.drawLine(cx - d, cy - d, cx - d + len, cy - d, strokePaint)
+                canvas.drawLine(cx + d - len, cy - d, cx + d, cy - d, strokePaint)
+                canvas.drawLine(cx + d, cy - d, cx + d, cy - d + len, strokePaint)
+                canvas.drawLine(cx - d, cy + d - len, cx - d, cy + d, strokePaint)
+                canvas.drawLine(cx - d, cy + d, cx - d + len, cy + d, strokePaint)
+                canvas.drawLine(cx + d - len, cy + d, cx + d, cy + d, strokePaint)
+                canvas.drawLine(cx + d, cy + d, cx + d, cy + d - len, strokePaint)
             }
             Mib3IconType.SETTINGS -> {
                 val outerR = s * 0.78f
@@ -704,15 +1006,10 @@ class Mib3BarGaugeView(
         style = Paint.Style.STROKE
         strokeWidth = 1.5f
     }
-    private val titlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        setShadowLayer(4f, 0f, 1f, Color.parseColor("#CC000000"))
-    }
-    private val valuePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        setShadowLayer(6f, 0f, 2f, Color.parseColor("#E6000000"))
-    }
-    private val unitPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        setShadowLayer(4f, 0f, 1f, Color.parseColor("#CC000000"))
-    }
+    private val titlePaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val valuePaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val unitPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val dropPaint = Paint(Paint.ANTI_ALIAS_FLAG)
 
     fun updateValue(v: Float) {
         targetVal = v.coerceIn(minVal, maxVal)
@@ -724,9 +1021,8 @@ class Mib3BarGaugeView(
     override fun onDraw(canvas: Canvas) {
         val w = width.toFloat()
         val h = height.toFloat()
-        val pad = h * 0.18f
+        val pad = h * 0.16f
 
-        // 1. Base MIB3 Deep Obsidian-Gray Glass Rectangle
         bgPaint.shader = LinearGradient(
             0f, 0f, w, 0f,
             intArrayOf(Color.parseColor("#0A0B0E"), Color.parseColor("#16181D"), Color.parseColor("#0E1014")),
@@ -735,7 +1031,6 @@ class Mib3BarGaugeView(
         )
         canvas.drawRect(0f, 0f, w, h, bgPaint)
 
-        // 2. Full-Height Left-to-Right Audi MIB3 Crimson & Metallic Red Gradient Fill
         val pct = ((displayVal - minVal) / (maxVal - minVal)).coerceIn(0f, 1f)
         val fillRight = w * pct
 
@@ -753,13 +1048,11 @@ class Mib3BarGaugeView(
             )
             canvas.drawRect(0f, 0f, fillRight, h, fillPaint)
 
-            // Crisp luminous leading edge line at the right tip of the fill
             fillPaint.shader = null
             fillPaint.color = Color.parseColor("#D9FF5A5E")
             canvas.drawRect(max(0f, fillRight - 2.5f), 0f, fillRight, h, fillPaint)
         }
 
-        // 3. Top MIB3 Glass Sheen Overlay across the entire rectangle
         sheenPaint.shader = LinearGradient(
             0f, 0f, 0f, h * 0.48f,
             Color.parseColor("#1AFFFFFF"),
@@ -768,40 +1061,42 @@ class Mib3BarGaugeView(
         )
         canvas.drawRect(0f, 0f, w, h * 0.48f, sheenPaint)
 
-        // 4. Outer Glass Border & Bottom Accent Line
         borderPaint.color = Color.parseColor("#38FFFFFF")
         canvas.drawRect(1f, 1f, w - 1f, h - 1f, borderPaint)
         borderPaint.color = if (pct > 0.02f) Color.parseColor("#E5393C") else Color.parseColor("#45FFFFFF")
         canvas.drawLine(0f, h - 1.5f, w, h - 1.5f, borderPaint)
 
-        // 5. High-Contrast Vertically Centered Typography
         val textCenterY = h * 0.5f
 
         titlePaint.color = Color.parseColor("#E6EAF0")
-        titlePaint.textSize = h * 0.21f
-        titlePaint.letterSpacing = 0.05f
+        titlePaint.textSize = h * 0.15f
+        titlePaint.letterSpacing = 0.04f
         titlePaint.typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
         titlePaint.textAlign = Paint.Align.LEFT
         val titleBaseline = textCenterY - (titlePaint.descent() + titlePaint.ascent()) * 0.5f
-        canvas.drawText(title, pad * 1.1f, titleBaseline, titlePaint)
+        canvas.drawText(title, pad * 1.05f, titleBaseline, titlePaint)
 
-        // Unit Label (Far Right)
         unitPaint.textAlign = Paint.Align.RIGHT
         unitPaint.color = Color.parseColor("#C8CDD6")
-        unitPaint.textSize = h * 0.20f
+        unitPaint.textSize = h * 0.155f
         unitPaint.typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-        val unitBaseline = textCenterY - (unitPaint.descent() + unitPaint.ascent()) * 0.5f + h * 0.03f
-        canvas.drawText(unit, w - pad * 1.1f, unitBaseline, unitPaint)
+        val unitBaseline = textCenterY - (unitPaint.descent() + unitPaint.ascent()) * 0.5f + h * 0.02f
+        canvas.drawText(unit, w - pad * 1.05f, unitBaseline, unitPaint)
 
-        // Large Primary Readout (To the left of Unit)
-        val unitWidth = unitPaint.measureText(unit) + pad * 0.45f
+        val unitWidth = unitPaint.measureText(unit) + pad * 0.35f
         val valStr = String.format(Locale.US, formatStr, displayVal)
+        val valX = w - pad * 1.05f - unitWidth
+
         valuePaint.textAlign = Paint.Align.RIGHT
         valuePaint.color = Color.WHITE
-        valuePaint.textSize = h * 0.44f
+        valuePaint.textSize = h * 0.33f
         valuePaint.typeface = Typeface.create("sans-serif-bold", Typeface.NORMAL)
         val valBaseline = textCenterY - (valuePaint.descent() + valuePaint.ascent()) * 0.5f
-        canvas.drawText(valStr, w - pad * 1.1f - unitWidth, valBaseline, valuePaint)
+
+        dropPaint.set(valuePaint)
+        dropPaint.color = Color.parseColor("#B3000000")
+        canvas.drawText(valStr, valX + 2f, valBaseline + 2f, dropPaint)
+        canvas.drawText(valStr, valX, valBaseline, valuePaint)
     }
 }
 
@@ -820,9 +1115,8 @@ class Mib3TempCardView(
         style = Paint.Style.STROKE
         strokeWidth = 1.5f
     }
-    private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        setShadowLayer(4f, 0f, 1f, Color.parseColor("#CC000000"))
-    }
+    private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val dropPaint = Paint(Paint.ANTI_ALIAS_FLAG)
 
     fun updateTemp(v: Float) {
         tempVal = v
@@ -832,7 +1126,7 @@ class Mib3TempCardView(
     override fun onDraw(canvas: Canvas) {
         val w = width.toFloat()
         val h = height.toFloat()
-        val pad = h * 0.16f
+        val pad = h * 0.15f
 
         val accentColor = when {
             tempVal < coolThresh -> Color.parseColor("#4DA6FF")
@@ -866,73 +1160,31 @@ class Mib3TempCardView(
 
         textPaint.textAlign = Paint.Align.LEFT
         textPaint.color = Color.parseColor("#C8CDD6")
-        textPaint.textSize = h * 0.21f
+        textPaint.textSize = h * 0.138f
+        textPaint.letterSpacing = 0.02f
         textPaint.typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
         val labelBase = textCenterY - (textPaint.descent() + textPaint.ascent()) * 0.5f
-        canvas.drawText(title, pad * 1.2f, labelBase, textPaint)
+        canvas.drawText(title, pad * 1.0f, labelBase, textPaint)
 
         textPaint.textAlign = Paint.Align.RIGHT
         textPaint.color = Color.parseColor("#9DA3AE")
-        textPaint.textSize = h * 0.21f
-        val unitBase = textCenterY - (textPaint.descent() + textPaint.ascent()) * 0.5f + h * 0.03f
-        canvas.drawText(unit, w - pad * 1.2f, unitBase, textPaint)
+        textPaint.textSize = h * 0.15f
+        val unitBase = textCenterY - (textPaint.descent() + textPaint.ascent()) * 0.5f + h * 0.02f
+        canvas.drawText(unit, w - pad * 1.0f, unitBase, textPaint)
 
-        val unitW = textPaint.measureText(unit) + pad * 0.4f
+        val unitW = textPaint.measureText(unit) + pad * 0.25f
+        val valStr = String.format(Locale.US, "%.0f", tempVal)
+        val valX = w - pad * 1.0f - unitW
+
         textPaint.color = accentColor
-        textPaint.textSize = h * 0.40f
+        textPaint.textSize = h * 0.29f
         textPaint.typeface = Typeface.create("sans-serif-bold", Typeface.NORMAL)
         val valBase = textCenterY - (textPaint.descent() + textPaint.ascent()) * 0.5f
-        canvas.drawText(String.format(Locale.US, "%.0f", tempVal), w - pad * 1.2f - unitW, valBase, textPaint)
-    }
-}
 
-class Mib3GlassTile(
-    context: Context,
-    private val label: String,
-    private val accentColor: Int
-) : View(context) {
-    private val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.STROKE
-        strokeWidth = 2f
-    }
-    private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG)
-
-    override fun onDraw(canvas: Canvas) {
-        val w = width.toFloat()
-        val h = height.toFloat()
-
-        bgPaint.shader = LinearGradient(
-            0f, 0f, w, h,
-            intArrayOf(Color.parseColor("#121418"), Color.parseColor("#25282E"), Color.parseColor("#0F1114")),
-            floatArrayOf(0f, 0.5f, 1f),
-            Shader.TileMode.CLAMP
-        )
-        canvas.drawRect(0f, 0f, w, h, bgPaint)
-
-        val sheen = Path().apply {
-            moveTo(0f, 0f)
-            lineTo(w, 0f)
-            lineTo(w, h * 0.42f)
-            lineTo(0f, h * 0.65f)
-            close()
-        }
-        bgPaint.shader = LinearGradient(0f, 0f, 0f, h * 0.65f, Color.parseColor("#18FFFFFF"), Color.TRANSPARENT, Shader.TileMode.CLAMP)
-        canvas.drawPath(sheen, bgPaint)
-
-        borderPaint.color = Color.parseColor("#35FFFFFF")
-        canvas.drawRect(1f, 1f, w - 1f, h - 1f, borderPaint)
-
-        borderPaint.color = accentColor
-        borderPaint.strokeWidth = 4f
-        canvas.drawLine(0f, h - 2f, w, h - 2f, borderPaint)
-
-        textPaint.color = Color.WHITE
-        textPaint.textAlign = Paint.Align.CENTER
-        textPaint.textSize = h * 0.085f
-        textPaint.letterSpacing = 0.08f
-        textPaint.typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-        canvas.drawText(label, w * 0.5f, h * 0.84f, textPaint)
+        dropPaint.set(textPaint)
+        dropPaint.color = Color.parseColor("#B3000000")
+        canvas.drawText(valStr, valX + 2f, valBase + 2f, dropPaint)
+        canvas.drawText(valStr, valX, valBase, textPaint)
     }
 }
 
@@ -945,20 +1197,20 @@ class Mib3ActionRow(
     init {
         orientation = VERTICAL
         gravity = Gravity.CENTER_VERTICAL
-        setPadding(32, 16, 32, 16)
+        setPadding(32, 12, 32, 12)
         setBackgroundColor(Color.parseColor("#17191E"))
         setOnClickListener { onClick() }
 
         addView(TextView(context).apply {
             text = title
             setTextColor(Color.WHITE)
-            textSize = 15f
+            textSize = 14f
             typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
         })
         addView(TextView(context).apply {
             text = subtitle
             setTextColor(Color.parseColor("#9DA3AE"))
-            textSize = 12f
+            textSize = 11.5f
         })
     }
 }
