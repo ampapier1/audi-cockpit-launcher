@@ -161,7 +161,6 @@ class MainActivity : Activity() {
                     if (index > 0) topMargin = dp(3)
                 }
                 setOnClickListener {
-                    focusInContent = false
                     focusedTab = index
                     handleRailActivate(index)
                 }
@@ -312,6 +311,8 @@ class MainActivity : Activity() {
 
         horizontalScrollView = HorizontalScrollView(this).apply {
             isHorizontalScrollBarEnabled = false
+            isFocusable = false
+            descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
             layoutParams = FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
@@ -656,96 +657,149 @@ class MainActivity : Activity() {
         return panel
     }
 
-    // Two-stage MMI Rotary Knob handler:
-    // Turning ONLY moves the highlight cursor; pressing center (DPAD_CENTER/ENTER) opens the selected item.
-    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
-        when (keyCode) {
-            KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_MEDIA_PREVIOUS -> {
-                if (!focusInContent) {
-                    focusedTab = (focusedTab - 1 + 5) % 5
-                } else if (activeTab == 0 && installedApps.isNotEmpty()) {
-                    focusedAppIndex = (focusedAppIndex - 1 + installedApps.size) % installedApps.size
-                    scrollAppTileIntoView(focusedAppIndex)
-                } else if (activeTab == 4 && settingRowViews.isNotEmpty()) {
-                    focusedSettingIndex = (focusedSettingIndex - 1 + settingRowViews.size) % settingRowViews.size
-                }
-                updateRotaryHighlights()
-                return true
-            }
-            KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_MEDIA_NEXT -> {
-                if (!focusInContent) {
-                    focusedTab = (focusedTab + 1) % 5
-                } else if (activeTab == 0 && installedApps.isNotEmpty()) {
-                    focusedAppIndex = (focusedAppIndex + 1) % installedApps.size
-                    scrollAppTileIntoView(focusedAppIndex)
-                } else if (activeTab == 4 && settingRowViews.isNotEmpty()) {
-                    focusedSettingIndex = (focusedSettingIndex + 1) % settingRowViews.size
-                }
-                updateRotaryHighlights()
-                return true
-            }
-            KeyEvent.KEYCODE_DPAD_RIGHT -> {
-                if (!focusInContent && (activeTab == 0 || activeTab == 4)) {
-                    focusInContent = true
-                } else if (focusInContent && activeTab == 0 && installedApps.isNotEmpty()) {
-                    focusedAppIndex = (focusedAppIndex + 2).coerceAtMost(installedApps.size - 1)
-                    scrollAppTileIntoView(focusedAppIndex)
-                }
-                updateRotaryHighlights()
-                return true
-            }
-            KeyEvent.KEYCODE_DPAD_LEFT -> {
-                if (focusInContent && activeTab == 0 && focusedAppIndex >= 2) {
-                    focusedAppIndex -= 2
-                    scrollAppTileIntoView(focusedAppIndex)
-                } else if (focusInContent) {
-                    focusInContent = false
-                }
-                updateRotaryHighlights()
-                return true
-            }
-            KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
-                if (!focusInContent) {
-                    handleRailActivate(focusedTab)
-                } else if (activeTab == 0 && focusedAppIndex in installedApps.indices) {
-                    launchPackage(installedApps[focusedAppIndex].packageName)
-                } else if (activeTab == 4 && focusedSettingIndex in settingRowViews.indices) {
-                    settingRowViews[focusedSettingIndex].performClick()
-                }
-                return true
-            }
-            KeyEvent.KEYCODE_BACK -> {
-                if (focusInContent) {
-                    focusInContent = false
+    // Intercept all rotary knob events at dispatchKeyEvent level so HorizontalScrollView never swallows them
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (event.action == KeyEvent.ACTION_DOWN) {
+            when (event.keyCode) {
+                KeyEvent.KEYCODE_DPAD_DOWN,
+                KeyEvent.KEYCODE_DPAD_RIGHT,
+                KeyEvent.KEYCODE_MEDIA_NEXT,
+                KeyEvent.KEYCODE_TAB -> {
+                    if (!focusInContent) {
+                        // Keep cycling strictly along the left navigation rail until knob is pressed in
+                        focusedTab = (focusedTab + 1) % 5
+                    } else if (activeTab == 0 && installedApps.isNotEmpty()) {
+                        advanceAppGridForward()
+                    } else if (activeTab == 4 && settingRowViews.isNotEmpty()) {
+                        focusedSettingIndex = (focusedSettingIndex + 1) % settingRowViews.size
+                    }
                     updateRotaryHighlights()
                     return true
                 }
-            }
-            KeyEvent.KEYCODE_VOICE_ASSIST, KeyEvent.KEYCODE_HEADSETHOOK -> {
-                try {
-                    val siriIntent = Intent(Intent.ACTION_VOICE_COMMAND).apply {
-                        flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                KeyEvent.KEYCODE_DPAD_UP,
+                KeyEvent.KEYCODE_DPAD_LEFT,
+                KeyEvent.KEYCODE_MEDIA_PREVIOUS -> {
+                    if (!focusInContent) {
+                        // Keep cycling strictly along the left navigation rail until knob is pressed in
+                        focusedTab = (focusedTab - 1 + 5) % 5
+                    } else if (activeTab == 0 && installedApps.isNotEmpty()) {
+                        advanceAppGridBackward()
+                    } else if (activeTab == 4 && settingRowViews.isNotEmpty()) {
+                        focusedSettingIndex = (focusedSettingIndex - 1 + settingRowViews.size) % settingRowViews.size
                     }
-                    startActivity(siriIntent)
-                } catch (_: Exception) {
-                    Toast.makeText(this, "Voice Assistant triggered", Toast.LENGTH_SHORT).show()
+                    updateRotaryHighlights()
+                    return true
                 }
-                return true
+                KeyEvent.KEYCODE_DPAD_CENTER,
+                KeyEvent.KEYCODE_ENTER -> {
+                    if (!focusInContent) {
+                        handleRailActivate(focusedTab)
+                    } else if (activeTab == 0 && focusedAppIndex in installedApps.indices) {
+                        launchPackage(installedApps[focusedAppIndex].packageName)
+                    } else if (activeTab == 4 && focusedSettingIndex in settingRowViews.indices) {
+                        settingRowViews[focusedSettingIndex].performClick()
+                    }
+                    return true
+                }
+                KeyEvent.KEYCODE_BACK -> {
+                    if (focusInContent) {
+                        focusInContent = false
+                        updateRotaryHighlights()
+                        return true
+                    }
+                }
+                KeyEvent.KEYCODE_VOICE_ASSIST,
+                KeyEvent.KEYCODE_HEADSETHOOK -> {
+                    try {
+                        val siriIntent = Intent(Intent.ACTION_VOICE_COMMAND).apply {
+                            flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                        }
+                        startActivity(siriIntent)
+                    } catch (_: Exception) {
+                        Toast.makeText(this, "Voice Assistant triggered", Toast.LENGTH_SHORT).show()
+                    }
+                    return true
+                }
             }
         }
-        return super.onKeyDown(keyCode, event)
+        return super.dispatchKeyEvent(event)
+    }
+
+    // Traverses entire top row (even indices: 0, 2, 4...) then wraps to bottom row (odd indices: 1, 3, 5...)
+    private fun advanceAppGridForward() {
+        val total = installedApps.size
+        if (total <= 1) return
+
+        if (focusedAppIndex % 2 == 0) {
+            // Currently on top row
+            val nextTop = focusedAppIndex + 2
+            if (nextTop < total) {
+                focusedAppIndex = nextTop
+            } else {
+                // Reached end of top row -> wrap to start of bottom row (index 1)
+                focusedAppIndex = 1
+            }
+        } else {
+            // Currently on bottom row
+            val nextBottom = focusedAppIndex + 2
+            if (nextBottom < total) {
+                focusedAppIndex = nextBottom
+            } else {
+                // Reached end of bottom row -> wrap back to start of top row (index 0)
+                focusedAppIndex = 0
+            }
+        }
+        scrollAppTileIntoView(focusedAppIndex)
+    }
+
+    // Reverse traversal: bottom row right-to-left -> top row right-to-left
+    private fun advanceAppGridBackward() {
+        val total = installedApps.size
+        if (total <= 1) return
+
+        val lastTop = if ((total - 1) % 2 == 0) total - 1 else total - 2
+        val lastBottom = if ((total - 1) % 2 == 1) total - 1 else total - 2
+
+        if (focusedAppIndex % 2 == 0) {
+            // Currently on top row
+            val prevTop = focusedAppIndex - 2
+            if (prevTop >= 0) {
+                focusedAppIndex = prevTop
+            } else {
+                // At start of top row -> wrap to end of bottom row
+                focusedAppIndex = if (lastBottom >= 1) lastBottom else lastTop
+            }
+        } else {
+            // Currently on bottom row
+            val prevBottom = focusedAppIndex - 2
+            if (prevBottom >= 1) {
+                focusedAppIndex = prevBottom
+            } else {
+                // At start of bottom row -> wrap to end of top row
+                focusedAppIndex = lastTop
+            }
+        }
+        scrollAppTileIntoView(focusedAppIndex)
     }
 
     private fun scrollAppTileIntoView(appIndex: Int) {
         val colIdx = appIndex / 2
-        val targetX = colIdx * dp(182)
-        horizontalScrollView.smoothScrollTo(targetX, 0)
+        val tileWidthPx = dp(182)
+        val targetLeft = colIdx * tileWidthPx
+        val viewportWidth = horizontalScrollView.width.takeIf { it > 0 } ?: dp(720)
+        val currentScroll = horizontalScrollView.scrollX
+
+        if (targetLeft < currentScroll) {
+            horizontalScrollView.smoothScrollTo(targetLeft, 0)
+        } else if (targetLeft + tileWidthPx > currentScroll + viewportWidth) {
+            horizontalScrollView.smoothScrollTo(targetLeft + tileWidthPx - viewportWidth, 0)
+        }
     }
 
     private fun updateRotaryHighlights() {
         railButtons.forEachIndexed { i, btn ->
             btn.setSelectedState(i == activeTab)
-            btn.setFocusedCursor(!focusInContent && i == focusedTab && i != activeTab)
+            btn.setFocusedCursor(!focusInContent && i == focusedTab)
         }
         appTileViews.forEachIndexed { i, tile ->
             tile.setRotaryFocused(focusInContent && activeTab == 0 && i == focusedAppIndex)
@@ -758,11 +812,33 @@ class MainActivity : Activity() {
     private fun handleRailActivate(index: Int) {
         focusedTab = index
         when (index) {
-            0 -> selectTab(0)
-            1 -> launchPackage("com.syu.carlink")
-            2 -> selectTab(2)
-            3 -> launchPackage("com.syu.av")
-            4 -> selectTab(4)
+            0 -> {
+                selectTab(0)
+                if (installedApps.isNotEmpty()) {
+                    focusInContent = true
+                    focusedAppIndex = 0
+                    scrollAppTileIntoView(0)
+                }
+            }
+            1 -> {
+                focusInContent = false
+                launchPackage("com.syu.carlink")
+            }
+            2 -> {
+                focusInContent = false
+                selectTab(2)
+            }
+            3 -> {
+                focusInContent = false
+                launchPackage("com.syu.av")
+            }
+            4 -> {
+                selectTab(4)
+                if (settingRowViews.isNotEmpty()) {
+                    focusInContent = true
+                    focusedSettingIndex = 0
+                }
+            }
         }
         updateRotaryHighlights()
     }
@@ -1039,7 +1115,6 @@ class Mib3RailButton(context: Context, private val iconType: Mib3IconType) : Vie
         val w = width.toFloat()
         val h = height.toFloat()
 
-        // Restored metallic gray gradient for rail buttons (crimson gradient when active)
         bgPaint.shader = if (isActive) {
             LinearGradient(
                 0f, 0f, w, 0f,
@@ -1057,11 +1132,9 @@ class Mib3RailButton(context: Context, private val iconType: Mib3IconType) : Vie
         }
         canvas.drawRect(0f, 0f, w, h, bgPaint)
 
-        // Subtle top bevel highlight
         sheenPaint.color = Color.parseColor("#16FFFFFF")
         canvas.drawLine(0f, 1f, w, 1f, sheenPaint)
 
-        // Right accent bar + rotary cursor outline
         borderPaint.strokeWidth = 2.5f
         borderPaint.color = when {
             isActive -> Color.parseColor("#FF4A4D")
@@ -1100,8 +1173,6 @@ class Mib3RailButton(context: Context, private val iconType: Mib3IconType) : Vie
                 canvas.drawPath(path, strokePaint)
             }
             Mib3IconType.CARPLAY -> {
-                // Authentic Apple CarPlay Icon:
-                // Rounded-square frame + right-pointing play triangle + bottom curved dashboard dock bar
                 val boxLeft = cx - s * 0.84f
                 val boxTop = cy - s * 0.84f
                 val boxRight = cx + s * 0.84f
@@ -1109,7 +1180,6 @@ class Mib3RailButton(context: Context, private val iconType: Mib3IconType) : Vie
                 val frameRect = RectF(boxLeft, boxTop, boxRight, boxBottom)
                 canvas.drawRoundRect(frameRect, s * 0.34f, s * 0.34f, strokePaint)
 
-                // Play triangle in upper-center of the CarPlay badge
                 val tri = Path().apply {
                     moveTo(cx - s * 0.24f, cy - s * 0.46f)
                     lineTo(cx + s * 0.36f, cy - s * 0.10f)
@@ -1118,7 +1188,6 @@ class Mib3RailButton(context: Context, private val iconType: Mib3IconType) : Vie
                 }
                 canvas.drawPath(tri, fillIconPaint)
 
-                // Signature CarPlay bottom dock / dashboard curve bar
                 val dockRect = RectF(cx - s * 0.48f, cy + s * 0.42f, cx + s * 0.48f, cy + s * 0.60f)
                 canvas.drawRoundRect(dockRect, s * 0.09f, s * 0.09f, fillIconPaint)
             }
@@ -1146,7 +1215,6 @@ class Mib3RailButton(context: Context, private val iconType: Mib3IconType) : Vie
                 canvas.drawRect(cx - s * 0.34f, cy + s * 0.04f, cx + s * 0.34f, cy + s * 0.34f, strokePaint)
             }
             Mib3IconType.MMI -> {
-                // Larger bold white "MMI" Audi typography
                 textPaint.color = iconColor
                 textPaint.textSize = s * 0.86f
                 textPaint.letterSpacing = 0.06f
@@ -1214,7 +1282,6 @@ class Mib3BarGaugeView(
         val h = height.toFloat()
         val pad = h * 0.16f
 
-        // Metallic gray gradient card surface
         bgPaint.shader = LinearGradient(
             0f, 0f, 0f, h,
             intArrayOf(Color.parseColor("#232730"), Color.parseColor("#14171D"), Color.parseColor("#0E1014")),
@@ -1236,7 +1303,6 @@ class Mib3BarGaugeView(
             canvas.drawRect(0f, 0f, fillRight, h, fillPaint)
         }
 
-        // Top glass sheen
         sheenPaint.color = Color.parseColor("#14FFFFFF")
         canvas.drawRect(0f, 0f, w, h * 0.14f, sheenPaint)
 
@@ -1314,7 +1380,6 @@ class Mib3TempCardView(
             else -> Color.parseColor("#FF3B3E")
         }
 
-        // Metallic gray gradient thermal card surface
         bgPaint.shader = LinearGradient(
             0f, 0f, 0f, h,
             intArrayOf(Color.parseColor("#232730"), Color.parseColor("#14171D"), Color.parseColor("#0E1014")),
