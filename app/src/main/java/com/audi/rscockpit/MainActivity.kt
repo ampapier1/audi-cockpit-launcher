@@ -12,6 +12,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.*
 import android.graphics.drawable.Drawable
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -40,13 +41,17 @@ class MainActivity : Activity() {
 
     private lateinit var homePanel: FrameLayout
     private lateinit var appGridContainer: LinearLayout
+    private lateinit var horizontalScrollView: HorizontalScrollView
     private lateinit var gaugesPanel: LinearLayout
     private lateinit var settingsPanel: LinearLayout
     private lateinit var clockText: TextView
     private lateinit var btStatusText: TextView
+    private lateinit var uninstallDropZone: TextView
 
     private val installedApps = mutableListOf<AppEntry>()
     private var draggedPackageName: String? = null
+    private val uiHandler = Handler(Looper.getMainLooper())
+    private var scrollLoopRunning = false
 
     private lateinit var boostGauge: Mib3BarGaugeView
     private lateinit var loadGauge: Mib3BarGaugeView
@@ -68,8 +73,6 @@ class MainActivity : Activity() {
     @Volatile private var egtBank1F = 890.0f
     @Volatile private var obdConnected = false
     @Volatile private var running = true
-
-    private val uiHandler = Handler(Looper.getMainLooper())
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -126,7 +129,7 @@ class MainActivity : Activity() {
         val rail = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             layoutParams = LinearLayout.LayoutParams(dp(72), ViewGroup.LayoutParams.MATCH_PARENT)
-            setBackgroundColor(Color.parseColor("#08090B"))
+            setBackgroundColor(Color.BLACK)
         }
 
         val icons = listOf(
@@ -154,13 +157,14 @@ class MainActivity : Activity() {
 
         root.addView(View(this).apply {
             layoutParams = LinearLayout.LayoutParams(dp(1), ViewGroup.LayoutParams.MATCH_PARENT)
-            setBackgroundColor(Color.parseColor("#2A2D32"))
+            setBackgroundColor(Color.parseColor("#1C1E22"))
         })
 
         val mainArea = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f)
             setPadding(dp(14), dp(8), dp(16), dp(10))
+            setBackgroundColor(Color.BLACK)
         }
 
         val statusBar = LinearLayout(this).apply {
@@ -206,11 +210,12 @@ class MainActivity : Activity() {
                 topMargin = dp(4)
                 bottomMargin = dp(8)
             }
-            setBackgroundColor(Color.parseColor("#2E3136"))
+            setBackgroundColor(Color.parseColor("#1C1E22"))
         })
 
         val contentFrame = FrameLayout(this).apply {
             layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
+            setBackgroundColor(Color.BLACK)
         }
 
         homePanel = buildHomePanel()
@@ -272,29 +277,28 @@ class MainActivity : Activity() {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
+            setBackgroundColor(Color.BLACK)
         }
 
         val hintText = TextView(this).apply {
-            text = "HOLD ANY APP ICON FOR 3 SECONDS TO DRAG & REORDER"
+            text = "HOLD ICON FOR 2s TO REORDER  •  DRAG TO BOTTOM TO UNINSTALL"
             setTextColor(Color.parseColor("#787E8A"))
             textSize = 9.5f
-            letterSpacing = 0.09f
-            gravity = Gravity.END
+            letterSpacing = 0.08f
+            gravity = Gravity.CENTER
             layoutParams = FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 Gravity.BOTTOM
-            )
+            ).apply { bottomMargin = dp(2) }
         }
 
-        val hScroll = HorizontalScrollView(this).apply {
+        horizontalScrollView = HorizontalScrollView(this).apply {
             isHorizontalScrollBarEnabled = false
             layoutParams = FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
-            ).apply {
-                bottomMargin = dp(16)
-            }
+            ).apply { bottomMargin = dp(32) }
         }
 
         appGridContainer = LinearLayout(this).apply {
@@ -307,8 +311,24 @@ class MainActivity : Activity() {
         }
 
         renderAppColumns()
-        hScroll.addView(appGridContainer)
-        wrapper.addView(hScroll)
+        horizontalScrollView.addView(appGridContainer)
+        wrapper.addView(horizontalScrollView)
+
+        uninstallDropZone = TextView(this).apply {
+            text = "DROP HERE TO UNINSTALL APP"
+            setTextColor(Color.WHITE)
+            textSize = 12f
+            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            gravity = Gravity.CENTER
+            setBackgroundColor(Color.parseColor("#D9B52D30"))
+            visibility = View.GONE
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(38),
+                Gravity.BOTTOM
+            )
+        }
+        wrapper.addView(uninstallDropZone)
         wrapper.addView(hintText)
         return wrapper
     }
@@ -385,9 +405,7 @@ class MainActivity : Activity() {
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply {
-                topMargin = dp(8)
-            }
+            ).apply { topMargin = dp(8) }
         }
 
         inner.addView(iconView)
@@ -401,7 +419,9 @@ class MainActivity : Activity() {
             dragStarted = true
             draggedPackageName = app.packageName
             card.setDraggingHighlight(true)
+            uninstallDropZone.visibility = View.VISIBLE
             card.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+            
             val clip = ClipData.newPlainText("app_pkg", app.packageName)
             val shadow = View.DragShadowBuilder(card)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
@@ -418,7 +438,7 @@ class MainActivity : Activity() {
                     downX = event.x
                     downY = event.y
                     dragStarted = false
-                    uiHandler.postDelayed(holdRunnable, 3000L)
+                    uiHandler.postDelayed(holdRunnable, 2000L)
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
@@ -445,6 +465,20 @@ class MainActivity : Activity() {
         card.setOnDragListener { _, dragEvent ->
             when (dragEvent.action) {
                 DragEvent.ACTION_DRAG_STARTED -> true
+                DragEvent.ACTION_DRAG_LOCATION -> {
+                    val screenX = dragEvent.x
+                    val edgeThreshold = dp(70)
+                    val widthPx = horizontalScrollView.width
+
+                    if (screenX < edgeThreshold) {
+                        startAutoScrollIfNeeded(-15)
+                    } else if (screenX > widthPx - edgeThreshold) {
+                        startAutoScrollIfNeeded(15)
+                    } else {
+                        stopAutoScroll()
+                    }
+                    true
+                }
                 DragEvent.ACTION_DRAG_ENTERED -> {
                     if (draggedPackageName != app.packageName) {
                         card.setDropTargetHighlight(true)
@@ -453,22 +487,38 @@ class MainActivity : Activity() {
                 }
                 DragEvent.ACTION_DRAG_EXITED -> {
                     card.setDropTargetHighlight(false)
+                    stopAutoScroll()
                     true
                 }
                 DragEvent.ACTION_DROP -> {
+                    stopAutoScroll()
+                    uninstallDropZone.visibility = View.GONE
                     card.setDropTargetHighlight(false)
-                    val fromPkg = draggedPackageName ?: return@setOnDragListener false
-                    val fromIdx = installedApps.indexOfFirst { it.packageName == fromPkg }
-                    val toIdx = installedApps.indexOfFirst { it.packageName == app.packageName }
-                    if (fromIdx != -1 && toIdx != -1 && fromIdx != toIdx) {
-                        val moved = installedApps.removeAt(fromIdx)
-                        installedApps.add(toIdx, moved)
-                        saveAppOrder()
-                        renderAppColumns()
+
+                    val dropY = dragEvent.y
+                    if (dropY > homePanel.height - dp(60)) {
+                        val pkg = draggedPackageName
+                        if (pkg != null) {
+                            val uri = Uri.parse("package:$pkg")
+                            val uninstallIntent = Intent(Intent.ACTION_DELETE, uri)
+                            startActivity(uninstallIntent)
+                        }
+                    } else {
+                        val fromPkg = draggedPackageName ?: return@setOnDragListener false
+                        val fromIdx = installedApps.indexOfFirst { it.packageName == fromPkg }
+                        val toIdx = installedApps.indexOfFirst { it.packageName == app.packageName }
+                        if (fromIdx != -1 && toIdx != -1 && fromIdx != toIdx) {
+                            val moved = installedApps.removeAt(fromIdx)
+                            installedApps.add(toIdx, moved)
+                            saveAppOrder()
+                            renderAppColumns()
+                        }
                     }
                     true
                 }
                 DragEvent.ACTION_DRAG_ENDED -> {
+                    stopAutoScroll()
+                    uninstallDropZone.visibility = View.GONE
                     card.setDraggingHighlight(false)
                     card.setDropTargetHighlight(false)
                     draggedPackageName = null
@@ -481,6 +531,21 @@ class MainActivity : Activity() {
         return card
     }
 
+    private fun startAutoScrollIfNeeded(dx: Int) {
+        if (scrollLoopRunning) return
+        scrollLoopRunning = true
+        thread(isDaemon = true) {
+            while (scrollLoopRunning) {
+                uiHandler.post { horizontalScrollView.smoothScrollBy(dx, 0) }
+                Thread.sleep(25)
+            }
+        }
+    }
+
+    private fun stopAutoScroll() {
+        scrollLoopRunning = false
+    }
+
     private fun buildGaugesPanel(): LinearLayout {
         val grid = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -488,6 +553,7 @@ class MainActivity : Activity() {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
+            setBackgroundColor(Color.BLACK)
         }
 
         val leftCol = LinearLayout(this).apply {
@@ -539,6 +605,7 @@ class MainActivity : Activity() {
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
             gravity = Gravity.CENTER_VERTICAL
+            setBackgroundColor(Color.BLACK)
         }
 
         val row1 = Mib3ActionRow(this, "Enable Physical Home Button Override (Accessibility Service)", "Locks physical Home key to Audi RS Cockpit instead of UI08") {
@@ -563,7 +630,35 @@ class MainActivity : Activity() {
         return panel
     }
 
+    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+        when (keyCode) {
+            KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_MEDIA_PREVIOUS -> {
+                activeTab = (activeTab - 1 + 5) % 5
+                handleRailClick(activeTab)
+                return true
+            }
+            KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.KEYCODE_MEDIA_NEXT -> {
+                activeTab = (activeTab + 1) % 5
+                handleRailClick(activeTab)
+                return true
+            }
+            KeyEvent.KEYCODE_VOICE_ASSIST, KeyEvent.KEYCODE_HEADSETHOOK -> {
+                try {
+                    val siriIntent = Intent(Intent.ACTION_VOICE_COMMAND).apply {
+                        flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                    }
+                    startActivity(siriIntent)
+                } catch (_: Exception) {
+                    Toast.makeText(this, "Voice Assistant triggered", Toast.LENGTH_SHORT).show()
+                }
+                return true
+            }
+        }
+        return super.onKeyDown(keyCode, event)
+    }
+
     private fun handleRailClick(index: Int) {
+        activeTab = index
         when (index) {
             0 -> selectTab(0)
             1 -> launchPackage("com.syu.carlink")
@@ -732,40 +827,16 @@ class MainActivity : Activity() {
 }
 
 // =============================================================================
-// CUSTOM AUDI MIB3 GLASS VIEWS & FULL-BACKGROUND SWEEPING BAR GAUGE
+// CUSTOM PITCH-BLACK MIB3 VIEWS
 // =============================================================================
 
 enum class Mib3IconType { HOME, CARPLAY, CAR_GAUGES, MMI, SETTINGS }
 
 class Mib3RootBackground(context: Context) : LinearLayout(context) {
-    private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
-        val w = width.toFloat()
-        val h = height.toFloat()
-        paint.shader = LinearGradient(
-            0f, 0f, w, h,
-            intArrayOf(Color.parseColor("#040406"), Color.parseColor("#0B0D11"), Color.parseColor("#050507")),
-            floatArrayOf(0f, 0.55f, 1f),
-            Shader.TileMode.CLAMP
-        )
-        canvas.drawRect(0f, 0f, w, h, paint)
-
-        val glassPath = Path().apply {
-            moveTo(w * 0.25f, h)
-            lineTo(w, h * 0.62f)
-            lineTo(w, h)
-            close()
-        }
-        paint.shader = LinearGradient(
-            w * 0.25f, h, w, h * 0.62f,
-            Color.parseColor("#0AFFFFFF"),
-            Color.parseColor("#18FFFFFF"),
-            Shader.TileMode.CLAMP
-        )
-        canvas.drawPath(glassPath, paint)
+        canvas.drawColor(Color.BLACK)
     }
-
     init { setWillNotDraw(false) }
 }
 
@@ -773,7 +844,6 @@ class Mib3AppTileFrame(context: Context) : FrameLayout(context) {
     private var isDragging = false
     private var isDropTarget = false
     private val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val sheenPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
         strokeWidth = 2f
@@ -796,42 +866,13 @@ class Mib3AppTileFrame(context: Context) : FrameLayout(context) {
         val w = width.toFloat()
         val h = height.toFloat()
 
-        if (isDragging || isDropTarget) {
-            bgPaint.shader = LinearGradient(
-                0f, 0f, w, h,
-                intArrayOf(Color.parseColor("#2A0B0E"), Color.parseColor("#7A1D20"), Color.parseColor("#3B0E10")),
-                floatArrayOf(0f, 0.5f, 1f),
-                Shader.TileMode.CLAMP
-            )
-        } else {
-            bgPaint.shader = LinearGradient(
-                0f, 0f, w, h,
-                intArrayOf(Color.parseColor("#111317"), Color.parseColor("#22252B"), Color.parseColor("#0E1013")),
-                floatArrayOf(0f, 0.52f, 1f),
-                Shader.TileMode.CLAMP
-            )
-        }
+        bgPaint.color = if (isDragging || isDropTarget) Color.parseColor("#3B0E10") else Color.parseColor("#0C0D10")
         canvas.drawRect(0f, 0f, w, h, bgPaint)
-
-        val sheen = Path().apply {
-            moveTo(0f, 0f)
-            lineTo(w, 0f)
-            lineTo(w, h * 0.40f)
-            lineTo(0f, h * 0.62f)
-            close()
-        }
-        sheenPaint.shader = LinearGradient(
-            0f, 0f, 0f, h * 0.62f,
-            Color.parseColor("#16FFFFFF"),
-            Color.TRANSPARENT,
-            Shader.TileMode.CLAMP
-        )
-        canvas.drawPath(sheen, sheenPaint)
 
         borderPaint.color = when {
             isDropTarget -> Color.parseColor("#FF4A4D")
             isDragging -> Color.parseColor("#E5393C")
-            else -> Color.parseColor("#35FFFFFF")
+            else -> Color.parseColor("#262930")
         }
         canvas.drawRect(1f, 1f, w - 1f, h - 1f, borderPaint)
     }
@@ -848,6 +889,10 @@ class Mib3RailButton(context: Context, private val iconType: Mib3IconType) : Vie
     private val fillIconPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.FILL
     }
+    private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        textAlign = Paint.Align.CENTER
+        typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+    }
     private val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
         strokeWidth = 2f
@@ -862,33 +907,17 @@ class Mib3RailButton(context: Context, private val iconType: Mib3IconType) : Vie
         val w = width.toFloat()
         val h = height.toFloat()
 
-        if (isActive) {
-            bgPaint.shader = LinearGradient(
-                0f, 0f, w, 0f,
-                intArrayOf(Color.parseColor("#180608"), Color.parseColor("#5C1618"), Color.parseColor("#9C2A2B")),
-                floatArrayOf(0f, 0.65f, 1f),
-                Shader.TileMode.CLAMP
-            )
-        } else {
-            bgPaint.shader = LinearGradient(
-                0f, 0f, w, 0f,
-                intArrayOf(Color.parseColor("#0A0B0D"), Color.parseColor("#1D1F23"), Color.parseColor("#2E3136")),
-                floatArrayOf(0f, 0.7f, 1f),
-                Shader.TileMode.CLAMP
-            )
-        }
+        bgPaint.color = if (isActive) Color.parseColor("#5C1618") else Color.BLACK
         canvas.drawRect(0f, 0f, w, h, bgPaint)
 
-        borderPaint.color = if (isActive) Color.parseColor("#FF4A4D") else Color.parseColor("#45FFFFFF")
+        borderPaint.color = if (isActive) Color.parseColor("#FF4A4D") else Color.parseColor("#22252B")
         canvas.drawLine(w - 1f, 0f, w - 1f, h, borderPaint)
-        borderPaint.color = Color.parseColor("#1FFFFFFF")
-        canvas.drawLine(0f, h - 1f, w, h - 1f, borderPaint)
 
         val cx = w * 0.5f
         val cy = h * 0.5f
         val s = min(w, h) * 0.25f
-
         val iconColor = if (isActive) Color.parseColor("#FF3B3E") else Color.parseColor("#ECEEF2")
+
         strokePaint.color = iconColor
         strokePaint.strokeWidth = s * 0.13f
         fillIconPaint.color = iconColor
@@ -908,20 +937,16 @@ class Mib3RailButton(context: Context, private val iconType: Mib3IconType) : Vie
                 canvas.drawPath(path, strokePaint)
             }
             Mib3IconType.CARPLAY -> {
-                val frameRect = RectF(cx - s * 0.88f, cy - s * 0.68f, cx + s * 0.88f, cy + s * 0.68f)
-                canvas.drawRoundRect(frameRect, s * 0.24f, s * 0.24f, strokePaint)
-                val barX = cx - s * 0.48f
-                canvas.drawLine(barX, cy - s * 0.64f, barX, cy + s * 0.64f, strokePaint)
-                canvas.drawCircle(cx - s * 0.68f, cy - s * 0.30f, s * 0.06f, fillIconPaint)
-                canvas.drawCircle(cx - s * 0.68f, cy, s * 0.06f, fillIconPaint)
-                canvas.drawCircle(cx - s * 0.68f, cy + s * 0.30f, s * 0.06f, fillIconPaint)
-                val playTri = Path().apply {
-                    moveTo(cx - s * 0.12f, cy - s * 0.34f)
-                    lineTo(cx + s * 0.48f, cy)
-                    lineTo(cx - s * 0.12f, cy + s * 0.34f)
-                    close()
-                }
-                canvas.drawPath(playTri, fillIconPaint)
+                val r = s * 0.75f
+                canvas.drawCircle(cx, cy, r, strokePaint)
+                val phoneRect = RectF(cx - s * 0.3f, cy - s * 0.5f, cx + s * 0.3f, cy + s * 0.5f)
+                canvas.drawRoundRect(phoneRect, s * 0.1f, s * 0.1f, fillIconPaint)
+                val screenRect = RectF(cx - s * 0.2f, cy - s * 0.35f, cx + s * 0.2f, cy + s * 0.25f)
+                val oldColor = fillIconPaint.color
+                fillIconPaint.color = Color.BLACK
+                canvas.drawRect(screenRect, fillIconPaint)
+                fillIconPaint.color = oldColor
+                canvas.drawCircle(cx, cy + s * 0.38f, s * 0.05f, fillIconPaint)
             }
             Mib3IconType.CAR_GAUGES -> {
                 val car = Path().apply {
@@ -944,23 +969,15 @@ class Mib3RailButton(context: Context, private val iconType: Mib3IconType) : Vie
                     lineTo(cx - s * 0.68f, cy - s * 0.15f)
                 }
                 canvas.drawPath(car, strokePaint)
-                canvas.drawLine(cx - s * 0.78f, cy + s * 0.06f, cx - s * 0.45f, cy + s * 0.12f, strokePaint)
-                canvas.drawLine(cx + s * 0.78f, cy + s * 0.06f, cx + s * 0.45f, cy + s * 0.12f, strokePaint)
                 canvas.drawRect(cx - s * 0.34f, cy + s * 0.04f, cx + s * 0.34f, cy + s * 0.34f, strokePaint)
             }
             Mib3IconType.MMI -> {
-                canvas.drawCircle(cx, cy, s * 0.48f, strokePaint)
-                canvas.drawCircle(cx, cy, s * 0.18f, fillIconPaint)
-                val d = s * 0.66f
-                val len = s * 0.22f
-                canvas.drawLine(cx - d, cy - d + len, cx - d, cy - d, strokePaint)
-                canvas.drawLine(cx - d, cy - d, cx - d + len, cy - d, strokePaint)
-                canvas.drawLine(cx + d - len, cy - d, cx + d, cy - d, strokePaint)
-                canvas.drawLine(cx + d, cy - d, cx + d, cy - d + len, strokePaint)
-                canvas.drawLine(cx - d, cy + d - len, cx - d, cy + d, strokePaint)
-                canvas.drawLine(cx - d, cy + d, cx - d + len, cy + d, strokePaint)
-                canvas.drawLine(cx + d - len, cy + d, cx + d, cy + d, strokePaint)
-                canvas.drawLine(cx + d, cy + d, cx + d, cy + d - len, strokePaint)
+                // Clean MMI text in bold white/crimson Audi font matching headers
+                textPaint.color = iconColor
+                textPaint.textSize = s * 0.65f
+                textPaint.letterSpacing = 0.08f
+                val baseline = cy - (textPaint.descent() + textPaint.ascent()) * 0.5f
+                canvas.drawText("MMI", cx, baseline, textPaint)
             }
             Mib3IconType.SETTINGS -> {
                 val outerR = s * 0.78f
@@ -999,9 +1016,8 @@ class Mib3BarGaugeView(
     private var targetVal = minVal
     private var displayVal = minVal
 
-    private val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#0C0D10") }
     private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val sheenPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
         strokeWidth = 1.5f
@@ -1023,12 +1039,6 @@ class Mib3BarGaugeView(
         val h = height.toFloat()
         val pad = h * 0.16f
 
-        bgPaint.shader = LinearGradient(
-            0f, 0f, w, 0f,
-            intArrayOf(Color.parseColor("#0A0B0E"), Color.parseColor("#16181D"), Color.parseColor("#0E1014")),
-            floatArrayOf(0f, 0.55f, 1f),
-            Shader.TileMode.CLAMP
-        )
         canvas.drawRect(0f, 0f, w, h, bgPaint)
 
         val pct = ((displayVal - minVal) / (maxVal - minVal)).coerceIn(0f, 1f)
@@ -1037,33 +1047,16 @@ class Mib3BarGaugeView(
         if (fillRight > 1f) {
             fillPaint.shader = LinearGradient(
                 0f, 0f, fillRight, 0f,
-                intArrayOf(
-                    Color.parseColor("#180507"),
-                    Color.parseColor("#4F1215"),
-                    Color.parseColor("#8A2124"),
-                    Color.parseColor("#B52D30")
-                ),
-                floatArrayOf(0f, 0.45f, 0.82f, 1f),
+                intArrayOf(Color.parseColor("#4F1215"), Color.parseColor("#B52D30")),
+                floatArrayOf(0f, 1f),
                 Shader.TileMode.CLAMP
             )
             canvas.drawRect(0f, 0f, fillRight, h, fillPaint)
-
-            fillPaint.shader = null
-            fillPaint.color = Color.parseColor("#D9FF5A5E")
-            canvas.drawRect(max(0f, fillRight - 2.5f), 0f, fillRight, h, fillPaint)
         }
 
-        sheenPaint.shader = LinearGradient(
-            0f, 0f, 0f, h * 0.48f,
-            Color.parseColor("#1AFFFFFF"),
-            Color.TRANSPARENT,
-            Shader.TileMode.CLAMP
-        )
-        canvas.drawRect(0f, 0f, w, h * 0.48f, sheenPaint)
-
-        borderPaint.color = Color.parseColor("#38FFFFFF")
+        borderPaint.color = Color.parseColor("#262930")
         canvas.drawRect(1f, 1f, w - 1f, h - 1f, borderPaint)
-        borderPaint.color = if (pct > 0.02f) Color.parseColor("#E5393C") else Color.parseColor("#45FFFFFF")
+        borderPaint.color = if (pct > 0.02f) Color.parseColor("#E5393C") else Color.parseColor("#262930")
         canvas.drawLine(0f, h - 1.5f, w, h - 1.5f, borderPaint)
 
         val textCenterY = h * 0.5f
@@ -1094,7 +1087,7 @@ class Mib3BarGaugeView(
         val valBaseline = textCenterY - (valuePaint.descent() + valuePaint.ascent()) * 0.5f
 
         dropPaint.set(valuePaint)
-        dropPaint.color = Color.parseColor("#B3000000")
+        dropPaint.color = Color.BLACK
         canvas.drawText(valStr, valX + 2f, valBaseline + 2f, dropPaint)
         canvas.drawText(valStr, valX, valBaseline, valuePaint)
     }
@@ -1109,8 +1102,7 @@ class Mib3TempCardView(
     private val hotThresh: Float
 ) : View(context) {
     private var tempVal = coolThresh
-    private val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val sheenPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#0C0D10") }
     private val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
         strokeWidth = 1.5f
@@ -1135,23 +1127,9 @@ class Mib3TempCardView(
             else -> Color.parseColor("#FF3B3E")
         }
 
-        bgPaint.shader = LinearGradient(
-            0f, 0f, w, h,
-            intArrayOf(Color.parseColor("#0A0B0E"), Color.parseColor("#1A1D22"), Color.parseColor("#101216")),
-            floatArrayOf(0f, 0.6f, 1f),
-            Shader.TileMode.CLAMP
-        )
         canvas.drawRect(0f, 0f, w, h, bgPaint)
 
-        sheenPaint.shader = LinearGradient(
-            0f, 0f, 0f, h * 0.45f,
-            Color.parseColor("#14FFFFFF"),
-            Color.TRANSPARENT,
-            Shader.TileMode.CLAMP
-        )
-        canvas.drawRect(0f, 0f, w, h * 0.45f, sheenPaint)
-
-        borderPaint.color = Color.parseColor("#35FFFFFF")
+        borderPaint.color = Color.parseColor("#262930")
         canvas.drawRect(1f, 1f, w - 1f, h - 1f, borderPaint)
         borderPaint.color = accentColor
         canvas.drawLine(0f, h - 2f, w, h - 2f, borderPaint)
@@ -1182,7 +1160,7 @@ class Mib3TempCardView(
         val valBase = textCenterY - (textPaint.descent() + textPaint.ascent()) * 0.5f
 
         dropPaint.set(textPaint)
-        dropPaint.color = Color.parseColor("#B3000000")
+        dropPaint.color = Color.BLACK
         canvas.drawText(valStr, valX + 2f, valBase + 2f, dropPaint)
         canvas.drawText(valStr, valX, valBase, textPaint)
     }
@@ -1198,7 +1176,7 @@ class Mib3ActionRow(
         orientation = VERTICAL
         gravity = Gravity.CENTER_VERTICAL
         setPadding(32, 12, 32, 12)
-        setBackgroundColor(Color.parseColor("#17191E"))
+        setBackgroundColor(Color.parseColor("#121418"))
         setOnClickListener { onClick() }
 
         addView(TextView(context).apply {
