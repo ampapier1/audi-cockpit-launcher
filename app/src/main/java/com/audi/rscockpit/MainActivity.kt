@@ -3,9 +3,8 @@ package com.audi.rscockpit
 import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Activity
-import android.bluetooth.BluetoothAdapter
-import android.bluetooth.BluetoothDevice
-import android.bluetooth.BluetoothSocket
+import android.bluetooth.*
+import android.bluetooth.le.*
 import android.content.ClipData
 import android.content.Context
 import android.content.Intent
@@ -22,10 +21,11 @@ import android.provider.Settings
 import android.text.TextUtils
 import android.view.*
 import android.widget.*
-import java.io.InputStream
-import java.io.OutputStream
 import java.text.SimpleDateFormat
 import java.util.*
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
 import kotlin.math.*
 
@@ -85,22 +85,29 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableImmersiveFullscreen()
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            if (checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
-                requestPermissions(
-                    arrayOf(Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.BLUETOOTH_SCAN),
-                    101
-                )
-            }
-        }
+        requestBlePermissions()
 
         loadInstalledApps()
         setContentView(buildRootLayout())
         selectTab(0)
         updateRotaryHighlights()
         startClockAndUiLoop()
-        startObd2Worker()
+        startBleObd2Worker()
+    }
+
+    private fun requestBlePermissions() {
+        val perms = mutableListOf(
+            Manifest.permission.ACCESS_FINE_LOCATION,
+            Manifest.permission.ACCESS_COARSE_LOCATION
+        )
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            perms.add(Manifest.permission.BLUETOOTH_CONNECT)
+            perms.add(Manifest.permission.BLUETOOTH_SCAN)
+        }
+        val missing = perms.filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
+        if (missing.isNotEmpty()) {
+            requestPermissions(missing.toTypedArray(), 101)
+        }
     }
 
     override fun onResume() {
@@ -128,7 +135,6 @@ class MainActivity : Activity() {
     }
 
     private fun buildRootLayout(): View {
-        // Pure pitch-black (#000000) root backdrop
         val root = Mib3RootBackground(this).apply {
             orientation = LinearLayout.HORIZONTAL
             layoutParams = ViewGroup.LayoutParams(
@@ -200,7 +206,7 @@ class MainActivity : Activity() {
         }
 
         btStatusText = TextView(this).apply {
-            text = "vLINKER: STANDBY"
+            text = "vLINKER BLE: SCANNING"
             setTextColor(Color.parseColor("#9DA3AE"))
             textSize = 10.5f
             letterSpacing = 0.06f
@@ -639,8 +645,8 @@ class MainActivity : Activity() {
             Mib3ActionRow(this, "Set Default Home Launcher", "Select Audi RS Cockpit as default Android Home app") {
                 startActivity(Intent(Settings.ACTION_HOME_SETTINGS))
             },
-            Mib3ActionRow(this, "Bluetooth Settings (Pair Vgate vLinker MC+)", "Ensure vLinker MC+ is paired once in Android Bluetooth") {
-                startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS))
+            Mib3ActionRow(this, "Enable Location Services (Required for vLinker BLE Scan)", "Android requires Location ON to auto-discover vLinker MC+ over BLE") {
+                startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS))
             },
             Mib3ActionRow(this, "Open Android System Settings", "Access FYT factory menu, display, and sound settings") {
                 startActivity(Intent(Settings.ACTION_SETTINGS))
@@ -657,7 +663,6 @@ class MainActivity : Activity() {
         return panel
     }
 
-    // Intercept all rotary knob events at dispatchKeyEvent level so HorizontalScrollView never swallows them
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         if (event.action == KeyEvent.ACTION_DOWN) {
             when (event.keyCode) {
@@ -666,7 +671,6 @@ class MainActivity : Activity() {
                 KeyEvent.KEYCODE_MEDIA_NEXT,
                 KeyEvent.KEYCODE_TAB -> {
                     if (!focusInContent) {
-                        // Keep cycling strictly along the left navigation rail until knob is pressed in
                         focusedTab = (focusedTab + 1) % 5
                     } else if (activeTab == 0 && installedApps.isNotEmpty()) {
                         advanceAppGridForward()
@@ -680,7 +684,6 @@ class MainActivity : Activity() {
                 KeyEvent.KEYCODE_DPAD_LEFT,
                 KeyEvent.KEYCODE_MEDIA_PREVIOUS -> {
                     if (!focusInContent) {
-                        // Keep cycling strictly along the left navigation rail until knob is pressed in
                         focusedTab = (focusedTab - 1 + 5) % 5
                     } else if (activeTab == 0 && installedApps.isNotEmpty()) {
                         advanceAppGridBackward()
@@ -725,34 +728,20 @@ class MainActivity : Activity() {
         return super.dispatchKeyEvent(event)
     }
 
-    // Traverses entire top row (even indices: 0, 2, 4...) then wraps to bottom row (odd indices: 1, 3, 5...)
     private fun advanceAppGridForward() {
         val total = installedApps.size
         if (total <= 1) return
 
         if (focusedAppIndex % 2 == 0) {
-            // Currently on top row
             val nextTop = focusedAppIndex + 2
-            if (nextTop < total) {
-                focusedAppIndex = nextTop
-            } else {
-                // Reached end of top row -> wrap to start of bottom row (index 1)
-                focusedAppIndex = 1
-            }
+            focusedAppIndex = if (nextTop < total) nextTop else 1
         } else {
-            // Currently on bottom row
             val nextBottom = focusedAppIndex + 2
-            if (nextBottom < total) {
-                focusedAppIndex = nextBottom
-            } else {
-                // Reached end of bottom row -> wrap back to start of top row (index 0)
-                focusedAppIndex = 0
-            }
+            focusedAppIndex = if (nextBottom < total) nextBottom else 0
         }
         scrollAppTileIntoView(focusedAppIndex)
     }
 
-    // Reverse traversal: bottom row right-to-left -> top row right-to-left
     private fun advanceAppGridBackward() {
         val total = installedApps.size
         if (total <= 1) return
@@ -761,23 +750,11 @@ class MainActivity : Activity() {
         val lastBottom = if ((total - 1) % 2 == 1) total - 1 else total - 2
 
         if (focusedAppIndex % 2 == 0) {
-            // Currently on top row
             val prevTop = focusedAppIndex - 2
-            if (prevTop >= 0) {
-                focusedAppIndex = prevTop
-            } else {
-                // At start of top row -> wrap to end of bottom row
-                focusedAppIndex = if (lastBottom >= 1) lastBottom else lastTop
-            }
+            focusedAppIndex = if (prevTop >= 0) prevTop else if (lastBottom >= 1) lastBottom else lastTop
         } else {
-            // Currently on bottom row
             val prevBottom = focusedAppIndex - 2
-            if (prevBottom >= 1) {
-                focusedAppIndex = prevBottom
-            } else {
-                // At start of bottom row -> wrap to end of top row
-                focusedAppIndex = lastTop
-            }
+            focusedAppIndex = if (prevBottom >= 1) prevBottom else lastTop
         }
         scrollAppTileIntoView(focusedAppIndex)
     }
@@ -867,7 +844,7 @@ class MainActivity : Activity() {
             override fun run() {
                 if (!running) return
                 clockText.text = fmt.format(Date())
-                btStatusText.text = if (obdConnected) "vLINKER MC+: LIVE" else "vLINKER: STANDBY"
+                btStatusText.text = if (obdConnected) "vLINKER BLE: LIVE" else "vLINKER BLE: SCANNING"
                 btStatusText.setTextColor(
                     if (obdConnected) Color.parseColor("#4CD964") else Color.parseColor("#9DA3AE")
                 )
@@ -887,69 +864,157 @@ class MainActivity : Activity() {
         })
     }
 
+    // =========================================================================
+    // DIRECT BLUETOOTH LOW ENERGY (BLE) GATT WORKER FOR vLinker MC-IOS / MC+
+    // =========================================================================
     @SuppressLint("MissingPermission")
-    private fun startObd2Worker() {
+    private fun startBleObd2Worker() {
         thread(isDaemon = true) {
-            val sppUuid = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
+            val cccdUuid = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
             var simPhase = 0.0
 
             while (running) {
-                var socket: BluetoothSocket? = null
+                var gatt: BluetoothGatt? = null
                 try {
-                    val adapter = BluetoothAdapter.getDefaultAdapter()
-                    val device: BluetoothDevice? = adapter?.bondedDevices?.firstOrNull {
-                        it.name?.contains("vLinker", ignoreCase = true) == true ||
-                            it.name?.contains("OBD", ignoreCase = true) == true
-                    }
+                    val btManager = getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+                    val adapter = btManager?.adapter
+                    val scanner = adapter?.bluetoothLeScanner
 
-                    if (device != null) {
-                        socket = device.createRfcommSocketToServiceRecord(sppUuid)
-                        socket.connect()
-                        val outStream = socket.outputStream
-                        val inStream = socket.inputStream
+                    if (adapter != null && adapter.isEnabled && scanner != null) {
+                        val foundDevice = scanForVlinkerBle(scanner)
+                        if (foundDevice != null) {
+                            val responseQueue = LinkedBlockingQueue<String>()
+                            val rxBuffer = StringBuilder()
+                            val readyLatch = CountDownLatch(1)
+                            var writeChar: BluetoothGattCharacteristic? = null
 
-                        listOf("ATZ\r", "ATE0\r", "ATL0\r", "ATS0\r", "ATH0\r", "ATSP6\r").forEach {
-                            sendObdCmd(outStream, inStream, it)
-                        }
-                        obdConnected = true
+                            val gattCallback = object : BluetoothGattCallback() {
+                                override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
+                                    if (newState == BluetoothProfile.STATE_CONNECTED) {
+                                        g.discoverServices()
+                                    } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+                                        obdConnected = false
+                                        readyLatch.countDown()
+                                    }
+                                }
 
-                        val baroKpa = parseSingleByte(sendObdCmd(outStream, inStream, "01331\r"), "4133", 101)
+                                override fun onServicesDiscovered(g: BluetoothGatt, status: Int) {
+                                    if (status != BluetoothGatt.GATT_SUCCESS) {
+                                        readyLatch.countDown()
+                                        return
+                                    }
+                                    var notifyChar: BluetoothGattCharacteristic? = null
+                                    for (service in g.services) {
+                                        for (ch in service.characteristics) {
+                                            val props = ch.properties
+                                            val canNotify = (props and BluetoothGattCharacteristic.PROPERTY_NOTIFY) != 0 ||
+                                                (props and BluetoothGattCharacteristic.PROPERTY_INDICATE) != 0
+                                            val canWrite = (props and BluetoothGattCharacteristic.PROPERTY_WRITE) != 0 ||
+                                                (props and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0
+                                            val uuidStr = ch.uuid.toString().lowercase(Locale.US)
+                                            // Target standard vLinker / HM-10 / Microchip UART GATT characteristics (fff1/fff2/ffe1)
+                                            if (uuidStr.contains("fff1") || uuidStr.contains("ffe1") || (canNotify && notifyChar == null)) {
+                                                if (canNotify) notifyChar = ch
+                                            }
+                                            if (uuidStr.contains("fff2") || uuidStr.contains("ffe1") || (canWrite && writeChar == null)) {
+                                                if (canWrite) writeChar = ch
+                                            }
+                                        }
+                                    }
 
-                        while (running && socket.isConnected) {
-                            val mapKpa = parseSingleByte(sendObdCmd(outStream, inStream, "010B1\r"), "410B", baroKpa)
-                            val loadRaw = parseSingleByte(sendObdCmd(outStream, inStream, "01041\r"), "4104", 0)
-                            val rpmRaw = parseTwoBytes(sendObdCmd(outStream, inStream, "010C1\r"), "410C", 800 * 4)
-                            val mafRaw = parseTwoBytes(sendObdCmd(outStream, inStream, "01101\r"), "4110", 400)
-                            val iatC = parseSingleByte(sendObdCmd(outStream, inStream, "010F1\r"), "410F", 68) - 40
-                            val ectC = parseSingleByte(sendObdCmd(outStream, inStream, "01051\r"), "4105", 130) - 40
-                            val oilC = parseSingleByte(sendObdCmd(outStream, inStream, "015C1\r"), "415C", 136) - 40
-                            val egtRaw = parseTwoBytes(sendObdCmd(outStream, inStream, "013C1\r"), "413C", 5000)
+                                    if (notifyChar != null && writeChar != null) {
+                                        g.setCharacteristicNotification(notifyChar, true)
+                                        val desc = notifyChar.getDescriptor(cccdUuid)
+                                        if (desc != null) {
+                                            desc.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                                            g.writeDescriptor(desc)
+                                        } else {
+                                            readyLatch.countDown()
+                                        }
+                                    } else {
+                                        readyLatch.countDown()
+                                    }
+                                }
 
-                            val rpm = rpmRaw / 4.0f
-                            val mafGs = mafRaw / 100.0f
-                            val currentBoost = max(0f, (mapKpa - baroKpa) * 0.145038f)
-                            val currentLoad = (loadRaw * 100f) / 255f
+                                override fun onDescriptorWrite(g: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
+                                    readyLatch.countDown()
+                                }
 
-                            val mafHp = mafGs * 1.38f
-                            val boostHp = (rpm / 6800f) * (275f + currentBoost * 10.6f) * (currentLoad / 100f)
-                            val calcHp = max(mafHp, boostHp).coerceIn(0f, 510f)
-                            val calcTq = if (rpm > 650f) ((calcHp * 5252f) / rpm).coerceIn(0f, 490f) else 0f
+                                @Deprecated("Deprecated in Java")
+                                override fun onCharacteristicChanged(g: BluetoothGatt, ch: BluetoothGattCharacteristic) {
+                                    val chunk = ch.value?.toString(Charsets.UTF_8) ?: return
+                                    synchronized(rxBuffer) {
+                                        rxBuffer.append(chunk)
+                                        val promptIdx = rxBuffer.indexOf(">")
+                                        if (promptIdx != -1) {
+                                            val fullMsg = rxBuffer.substring(0, promptIdx).replace("\\s".toRegex(), "")
+                                            rxBuffer.delete(0, promptIdx + 1)
+                                            responseQueue.offer(fullMsg)
+                                        }
+                                    }
+                                }
+                            }
 
-                            boostPsi = currentBoost
-                            engineLoadPct = currentLoad
-                            crankHp = calcHp
-                            crankTq = calcTq
-                            iatF = iatC * 1.8f + 32f
-                            coolantF = ectC * 1.8f + 32f
-                            oilF = oilC * 1.8f + 32f
-                            egtBank1F = ((egtRaw / 10f) - 40f) * 1.8f + 32f
+                            gatt = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                                foundDevice.connectGatt(this, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
+                            } else {
+                                foundDevice.connectGatt(this, false, gattCallback)
+                            }
+
+                            readyLatch.await(8, TimeUnit.SECONDS)
+
+                            if (gatt != null && writeChar != null) {
+                                val targetWrite = writeChar!!
+                                listOf("ATZ\r", "ATE0\r", "ATL0\r", "ATS0\r", "ATH0\r", "ATSP6\r").forEach {
+                                    sendBleObdCmd(gatt, targetWrite, responseQueue, it)
+                                }
+                                obdConnected = true
+
+                                val baroKpa = parseSingleByte(
+                                    sendBleObdCmd(gatt, targetWrite, responseQueue, "01331\r"),
+                                    "4133",
+                                    101
+                                )
+
+                                while (running && obdConnected) {
+                                    val mapKpa = parseSingleByte(sendBleObdCmd(gatt, targetWrite, responseQueue, "010B1\r"), "410B", baroKpa)
+                                    val loadRaw = parseSingleByte(sendBleObdCmd(gatt, targetWrite, responseQueue, "01041\r"), "4104", 0)
+                                    val rpmRaw = parseTwoBytes(sendBleObdCmd(gatt, targetWrite, responseQueue, "010C1\r"), "410C", 800 * 4)
+                                    val mafRaw = parseTwoBytes(sendBleObdCmd(gatt, targetWrite, responseQueue, "01101\r"), "4110", 400)
+                                    val iatC = parseSingleByte(sendBleObdCmd(gatt, targetWrite, responseQueue, "010F1\r"), "410F", 68) - 40
+                                    val ectC = parseSingleByte(sendBleObdCmd(gatt, targetWrite, responseQueue, "01051\r"), "4105", 130) - 40
+                                    val oilC = parseSingleByte(sendBleObdCmd(gatt, targetWrite, responseQueue, "015C1\r"), "415C", 136) - 40
+                                    val egtRaw = parseTwoBytes(sendBleObdCmd(gatt, targetWrite, responseQueue, "013C1\r"), "413C", 5000)
+
+                                    val rpm = rpmRaw / 4.0f
+                                    val mafGs = mafRaw / 100.0f
+                                    val currentBoost = max(0f, (mapKpa - baroKpa) * 0.145038f)
+                                    val currentLoad = (loadRaw * 100f) / 255f
+
+                                    val mafHp = mafGs * 1.38f
+                                    val boostHp = (rpm / 6800f) * (275f + currentBoost * 10.6f) * (currentLoad / 100f)
+                                    val calcHp = max(mafHp, boostHp).coerceIn(0f, 510f)
+                                    val calcTq = if (rpm > 650f) ((calcHp * 5252f) / rpm).coerceIn(0f, 490f) else 0f
+
+                                    boostPsi = currentBoost
+                                    engineLoadPct = currentLoad
+                                    crankHp = calcHp
+                                    crankTq = calcTq
+                                    iatF = iatC * 1.8f + 32f
+                                    coolantF = ectC * 1.8f + 32f
+                                    oilF = oilC * 1.8f + 32f
+                                    egtBank1F = ((egtRaw / 10f) - 40f) * 1.8f + 32f
+                                }
+                            }
                         }
                     }
                 } catch (_: Exception) {
                     obdConnected = false
-                    try { socket?.close() } catch (_: Exception) {}
+                } finally {
+                    try { gatt?.close() } catch (_: Exception) {}
                 }
 
+                // Smooth 60 FPS simulated demo fallback while scanning/standby
                 if (!obdConnected && running) {
                     simPhase += 0.045
                     val wave = ((sin(simPhase) + 1.0) * 0.5).toFloat()
@@ -967,21 +1032,51 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun sendObdCmd(out: OutputStream, input: InputStream, cmd: String): String {
-        out.write(cmd.toByteArray())
-        out.flush()
-        val sb = StringBuilder()
-        val deadline = System.currentTimeMillis() + 180
-        while (System.currentTimeMillis() < deadline) {
-            if (input.available() > 0) {
-                val c = input.read().toChar()
-                if (c == '>') break
-                sb.append(c)
-            } else {
-                Thread.sleep(4)
+    @SuppressLint("MissingPermission")
+    private fun scanForVlinkerBle(scanner: BluetoothLeScanner): BluetoothDevice? {
+        var matched: BluetoothDevice? = null
+        val latch = CountDownLatch(1)
+        val callback = object : ScanCallback() {
+            override fun onScanResult(callbackType: Int, result: ScanResult) {
+                val name = result.device?.name ?: result.scanRecord?.deviceName ?: ""
+                if (name.contains("vLinker", ignoreCase = true) || name.contains("OBD", ignoreCase = true)) {
+                    matched = result.device
+                    latch.countDown()
+                }
             }
         }
-        return sb.toString().replace("\\s".toRegex(), "")
+        try {
+            val settings = ScanSettings.Builder()
+                .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+                .build()
+            scanner.startScan(null, settings, callback)
+            latch.await(4, TimeUnit.SECONDS)
+        } catch (_: Exception) {
+        } finally {
+            try { scanner.stopScan(callback) } catch (_: Exception) {}
+        }
+        return matched
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun sendBleObdCmd(
+        gatt: BluetoothGatt,
+        writeChar: BluetoothGattCharacteristic,
+        queue: LinkedBlockingQueue<String>,
+        cmd: String
+    ): String {
+        queue.clear()
+        writeChar.writeType = if ((writeChar.properties and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0) {
+            BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+        } else {
+            BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+        }
+        writeChar.value = cmd.toByteArray(Charsets.UTF_8)
+        if (!gatt.writeCharacteristic(writeChar)) {
+            obdConnected = false
+            return ""
+        }
+        return queue.poll(250, TimeUnit.MILLISECONDS) ?: ""
     }
 
     private fun parseSingleByte(resp: String, header: String, fallback: Int): Int {
@@ -1065,7 +1160,6 @@ class Mib3AppTileFrame(context: Context) : FrameLayout(context) {
         }
         canvas.drawRect(0f, 0f, w, h, bgPaint)
 
-        // Top glass edge highlight
         sheenPaint.color = Color.parseColor("#18FFFFFF")
         canvas.drawRect(0f, 0f, w, h * 0.12f, sheenPaint)
 
